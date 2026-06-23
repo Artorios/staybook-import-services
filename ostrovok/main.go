@@ -22,10 +22,13 @@ import (
 // Конфиг
 // ---------------------------------------------------------------------------
 
+const defaultMaxLineSize = 16 * 1024 * 1024 // 16 МБ
+
 type Config struct {
 	DatabaseURL string
 	DumpsDir    string
 	BatchSize   int
+	MaxLineSize int
 }
 
 func configFromEnv() Config {
@@ -35,10 +38,17 @@ func configFromEnv() Config {
 			batchSize = n
 		}
 	}
+	maxLineSize := defaultMaxLineSize
+	if v := os.Getenv("MAX_LINE_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxLineSize = n
+		}
+	}
 	return Config{
 		DatabaseURL: mustEnv("DATABASE_URL"),
 		DumpsDir:    mustEnv("DUMPS_DIR"),
 		BatchSize:   batchSize,
+		MaxLineSize: maxLineSize,
 	}
 }
 
@@ -84,12 +94,13 @@ func (s Stats) String() string {
 // ---------------------------------------------------------------------------
 
 type Importer struct {
-	pool      *pgxpool.Pool
-	batchSize int
+	pool        *pgxpool.Pool
+	batchSize   int
+	maxLineSize int
 }
 
-func NewImporter(pool *pgxpool.Pool, batchSize int) *Importer {
-	return &Importer{pool: pool, batchSize: batchSize}
+func NewImporter(pool *pgxpool.Pool, batchSize, maxLineSize int) *Importer {
+	return &Importer{pool: pool, batchSize: batchSize, maxLineSize: maxLineSize}
 }
 
 const maxErrorMsgsInDB = 20
@@ -103,15 +114,30 @@ func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64)
 	var batchStartOffset int64
 
 	counter := &byteCounter{r: r}
-	scanner := bufio.NewScanner(counter)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024) // строки до 4 МБ
+	reader := bufio.NewReaderSize(counter, imp.maxLineSize)
 
 	for {
 		lineOffset := counter.offset
-		if !scanner.Scan() {
-			break
+		line, err := reader.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			msg := fmt.Sprintf("offset %d: line exceeds %d bytes, skipped", lineOffset, imp.maxLineSize)
+			slog.Warn("line too long, skipping", "offset", lineOffset, "max", imp.maxLineSize)
+			lineErrors = append(lineErrors, msg)
+			stats.Errors++
+			if _, discardErr := reader.ReadBytes('\n'); discardErr != nil && !errors.Is(discardErr, io.EOF) {
+				return stats, lineErrors, fmt.Errorf("discard oversized line at offset %d: %w", lineOffset, discardErr)
+			}
+			continue
 		}
-		line := scanner.Bytes()
+		if errors.Is(err, io.EOF) {
+			if len(line) == 0 {
+				break
+			}
+		} else if err != nil {
+			return stats, lineErrors, fmt.Errorf("read at file offset %d: %w", lineOffset, err)
+		}
+
+		line = bytes.TrimSuffix(line, []byte{'\n'})
 		if len(line) == 0 {
 			continue
 		}
@@ -151,10 +177,6 @@ func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64)
 				slog.Info("progress", "processed", stats.Total)
 			}
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return stats, lineErrors, fmt.Errorf("scanner at file offset %d: %w", counter.offset, err)
 	}
 
 	// последний неполный батч
@@ -400,7 +422,7 @@ func main() {
 
 	// Импорт
 	start := time.Now()
-	imp := NewImporter(pool, cfg.BatchSize)
+	imp := NewImporter(pool, cfg.BatchSize, cfg.MaxLineSize)
 	stats, lineErrors, importErr := imp.Import(ctx, f, runID)
 
 	finishImportRun(ctx, pool, runID, stats, lineErrors, importErr)
@@ -436,7 +458,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-// byteCounter отслеживает смещение в файле при чтении через bufio.Scanner.
+// byteCounter отслеживает смещение в файле при построчном чтении дампа.
 type byteCounter struct {
 	r      io.Reader
 	offset int64

@@ -27,6 +27,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable
       DUMPS_DIR: /data
       BATCH_SIZE: ${BATCH_SIZE}
+      MAX_LINE_SIZE: ${MAX_LINE_SIZE:-16777216}
     volumes:
       - ./data:/data
     depends_on:
