@@ -107,7 +107,8 @@ const maxErrorMsgsInDB = 20
 
 // Import читает NDJSON-файл построчно и делает батч-upsert.
 // importRunID — ID записи в таблице import_runs.
-func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64) (Stats, []string, error) {
+// progress — опциональный индикатор; nil отключает вывод.
+func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64, progress *importProgress) (Stats, []string, error) {
 	var stats Stats
 	var lineErrors []string
 	batch := make([]Hotel, 0, imp.batchSize)
@@ -173,8 +174,8 @@ func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64)
 			stats.Upsert += n
 			batch = batch[:0]
 
-			if stats.Total%10000 == 0 {
-				slog.Info("progress", "processed", stats.Total)
+			if progress != nil {
+				progress.update(counter.offset, stats)
 			}
 		}
 	}
@@ -186,6 +187,10 @@ func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64)
 			return stats, lineErrors, fmt.Errorf("upsert final batch at file offset %d: %w", batchStartOffset, err)
 		}
 		stats.Upsert += n
+	}
+
+	if progress != nil {
+		progress.finish(counter.offset, stats)
 	}
 
 	return stats, lineErrors, nil
@@ -420,10 +425,18 @@ func main() {
 	}
 	defer f.Close()
 
+	fi, err := f.Stat()
+	if err != nil {
+		slog.Error("failed to stat dump", "err", err)
+		finishImportRun(ctx, pool, runID, Stats{}, nil, err)
+		os.Exit(1)
+	}
+
 	// Импорт
 	start := time.Now()
+	progress := newImportProgress(fi.Size(), start)
 	imp := NewImporter(pool, cfg.BatchSize, cfg.MaxLineSize)
-	stats, lineErrors, importErr := imp.Import(ctx, f, runID)
+	stats, lineErrors, importErr := imp.Import(ctx, f, runID, progress)
 
 	finishImportRun(ctx, pool, runID, stats, lineErrors, importErr)
 
@@ -436,6 +449,110 @@ func main() {
 		"stats", stats.String(),
 		"duration", time.Since(start).Round(time.Second),
 	)
+}
+
+// ---------------------------------------------------------------------------
+// Прогресс импорта (stderr, чтобы не мешать slog)
+// ---------------------------------------------------------------------------
+
+const progressBarWidth = 40
+
+type importProgress struct {
+	fileSize   int64
+	start      time.Time
+	lastRender time.Time
+}
+
+func newImportProgress(fileSize int64, start time.Time) *importProgress {
+	return &importProgress{fileSize: fileSize, start: start}
+}
+
+func (p *importProgress) update(bytesRead int64, stats Stats) {
+	if time.Since(p.lastRender) < 200*time.Millisecond {
+		return
+	}
+	p.render(bytesRead, stats, false)
+}
+
+func (p *importProgress) finish(bytesRead int64, stats Stats) {
+	p.render(bytesRead, stats, true)
+}
+
+func (p *importProgress) render(bytesRead int64, stats Stats, final bool) {
+	p.lastRender = time.Now()
+	elapsed := time.Since(p.start)
+
+	var pct float64
+	if p.fileSize > 0 {
+		pct = float64(bytesRead) / float64(p.fileSize) * 100
+		if pct > 100 {
+			pct = 100
+		}
+	}
+
+	filled := int(pct / 100 * progressBarWidth)
+	if filled > progressBarWidth {
+		filled = progressBarWidth
+	}
+	bar := "[" + strings.Repeat("█", filled) + strings.Repeat("░", progressBarWidth-filled) + "]"
+
+	var rate string
+	if elapsed > 0 {
+		rate = fmt.Sprintf("%d/s", int(float64(stats.Total)/elapsed.Seconds()))
+	}
+
+	line := fmt.Sprintf("\r%s %5.1f%% | %s hotels | %s/%s | %s elapsed | %s",
+		bar, pct, formatInt(stats.Total), formatBytes(bytesRead), formatBytes(p.fileSize),
+		formatDuration(elapsed), rate)
+	if stats.Errors > 0 {
+		line += fmt.Sprintf(" | %d errors", stats.Errors)
+	}
+
+	fmt.Fprint(os.Stderr, line)
+	if final {
+		fmt.Fprintln(os.Stderr)
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+	if h > 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%02d:%02d", m, s)
+}
+
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func formatInt(n int) string {
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 // ---------------------------------------------------------------------------
