@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -123,7 +124,7 @@ func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64)
 			stats.Errors++
 			continue
 		}
-		h.Raw = line
+		h.Raw = bytes.Clone(line)
 
 		// извлекаем country_code из region
 		if len(h.Region) > 0 {
@@ -201,7 +202,7 @@ func (imp *Importer) upsertBatch(ctx context.Context, hotels []Hotel, importRunI
 	for i, h := range hotels {
 		rows[i] = []any{
 			h.HID, h.ID, h.Name, h.Lat, h.Lon,
-			h.Country, h.Deleted, h.Raw, importRunID,
+			h.Country, h.Deleted, string(h.Raw), importRunID,
 		}
 	}
 
