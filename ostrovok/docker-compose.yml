@@ -8,6 +8,19 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PGPORT: ${POSTGRES_PORT}
+      DEBEZIUM_USER: ${DEBEZIUM_USER}
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD}
+      DEBEZIUM_PUBLICATION: ${DEBEZIUM_PUBLICATION}
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_replication_workers=10
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
@@ -18,6 +31,59 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - ostrovok
+
+  debezium-connect:
+    image: quay.io/debezium/connect:3.0
+    container_name: ostrovok_debezium_connect
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      GROUP_ID: ${DEBEZIUM_GROUP_ID}
+      CONFIG_STORAGE_TOPIC: ${DEBEZIUM_CONFIG_TOPIC}
+      OFFSET_STORAGE_TOPIC: ${DEBEZIUM_OFFSET_TOPIC}
+      STATUS_STORAGE_TOPIC: ${DEBEZIUM_STATUS_TOPIC}
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_REST_ADVERTISED_HOST_NAME: debezium-connect
+    ports:
+      - "${DEBEZIUM_CONNECT_PORT:-8083}:8083"
+    networks:
+      - ostrovok
+      - staybook-network
+
+  debezium-init:
+    image: curlimages/curl:8.12.1
+    container_name: ostrovok_debezium_init
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      debezium-connect:
+        condition: service_started
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      DEBEZIUM_USER: ${DEBEZIUM_USER}
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD}
+      DEBEZIUM_SLOT_NAME: ${DEBEZIUM_SLOT_NAME}
+      DEBEZIUM_PUBLICATION: ${DEBEZIUM_PUBLICATION}
+      DEBEZIUM_TOPIC_PREFIX: ${DEBEZIUM_TOPIC_PREFIX}
+      DEBEZIUM_CONNECTOR_NAME: ${DEBEZIUM_CONNECTOR_NAME}
+    volumes:
+      - ./debezium/register-connector.sh:/register-connector.sh:ro
+    entrypoint: ["/bin/sh", "/register-connector.sh"]
+    networks:
+      - ostrovok
 
   ostrovok-import-service:
     build: .
@@ -33,6 +99,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - ostrovok
 
 volumes:
   postgres_data:
+
+networks:
+  ostrovok:
+    driver: bridge
+  staybook-network:
+    external: true
