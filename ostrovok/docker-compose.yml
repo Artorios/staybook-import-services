@@ -20,7 +20,7 @@ services:
       - -c
       - max_replication_slots=10
       - -c
-      - max_replication_workers=10
+      - max_logical_replication_workers=10
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
