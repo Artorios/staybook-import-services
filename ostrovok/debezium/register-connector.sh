@@ -31,7 +31,8 @@ payload=$(cat <<EOF
   "key.converter.schemas.enable": "false",
   "value.converter.schemas.enable": "false",
   "snapshot.mode": "initial",
-  "tombstones.on.delete": "false"
+  "tombstones.on.delete": "false",
+  "producer.override.max.request.size": "16777216"
 }
 EOF
 )

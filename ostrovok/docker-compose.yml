@@ -55,6 +55,7 @@ services:
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
       CONNECT_REST_ADVERTISED_HOST_NAME: debezium-connect
+      CONNECT_PRODUCER_MAX_REQUEST_SIZE: 16777216
     ports:
       - "${DEBEZIUM_CONNECT_PORT:-8083}:8083"
     networks:
