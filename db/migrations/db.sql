@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS hotels (
     CONSTRAINT hotels_provider_external_id_unique UNIQUE (provider, external_id)
 );
 
+-- Debezium: при REPLICA IDENTITY DEFAULT неизменённый TOAST-колонка data не попадает в WAL
+-- на UPDATE → __debezium_unavailable_value в Kafka. FULL включает все колонки в событие.
+ALTER TABLE hotels REPLICA IDENTITY FULL;
+
 CREATE INDEX IF NOT EXISTS hotels_provider_country_code_idx ON hotels (provider, country_code);
 CREATE INDEX IF NOT EXISTS hotels_provider_slug_idx         ON hotels (provider, slug);
 CREATE INDEX IF NOT EXISTS hotels_deleted_at_idx             ON hotels (deleted_at) WHERE deleted_at IS NOT NULL;
