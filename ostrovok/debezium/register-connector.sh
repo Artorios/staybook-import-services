@@ -35,6 +35,7 @@ payload=$(cat <<EOF
   "producer.override.max.request.size": "16777216",
   "snapshot.fetch.size": "100",
   "max.batch.size": "100"
+  "message.key.columns": "public.hotels:external_id",
 }
 EOF
 )
