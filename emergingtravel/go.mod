@@ -1,4 +1,4 @@
-module ostrovok
+module emergingtravel
 
 go 1.25.0
 

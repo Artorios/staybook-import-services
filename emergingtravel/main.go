@@ -26,6 +26,7 @@ const defaultMaxLineSize = 16 * 1024 * 1024 // 16 МБ
 
 type Config struct {
 	DatabaseURL string
+	Provider    string
 	DumpsDir    string
 	BatchSize   int
 	MaxLineSize int
@@ -46,6 +47,7 @@ func configFromEnv() Config {
 	}
 	return Config{
 		DatabaseURL: mustEnv("DATABASE_URL"),
+		Provider:    envOr("PROVIDER", "emergingtravel"),
 		DumpsDir:    mustEnv("DUMPS_DIR"),
 		BatchSize:   batchSize,
 		MaxLineSize: maxLineSize,
@@ -95,12 +97,13 @@ func (s Stats) String() string {
 
 type Importer struct {
 	pool        *pgxpool.Pool
+	provider    string
 	batchSize   int
 	maxLineSize int
 }
 
-func NewImporter(pool *pgxpool.Pool, batchSize, maxLineSize int) *Importer {
-	return &Importer{pool: pool, batchSize: batchSize, maxLineSize: maxLineSize}
+func NewImporter(pool *pgxpool.Pool, provider string, batchSize, maxLineSize int) *Importer {
+	return &Importer{pool: pool, provider: provider, batchSize: batchSize, maxLineSize: maxLineSize}
 }
 
 const maxErrorMsgsInDB = 20
@@ -160,6 +163,10 @@ func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64,
 			h.Country = reg.CountryCode
 		}
 
+		if h.Deleted {
+			stats.Deleted++
+		}
+
 		if len(batch) == 0 {
 			batchStartOffset = lineOffset
 		}
@@ -199,24 +206,23 @@ func (imp *Importer) Import(ctx context.Context, r io.Reader, importRunID int64,
 // upsertBatch вставляет/обновляет батч отелей через pgx CopyFrom + ON CONFLICT.
 // Возвращает количество затронутых строк.
 func (imp *Importer) upsertBatch(ctx context.Context, hotels []Hotel, importRunID int64) (int, error) {
-	// Используем временную таблицу + INSERT ... ON CONFLICT для атомарности
 	tx, err := imp.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Создаём temp-таблицу для батча
 	_, err = tx.Exec(ctx, `
 		CREATE TEMP TABLE hotels_import_batch (
-			external_id  BIGINT,
-			slug         TEXT,
-			name         TEXT,
-			latitude     DOUBLE PRECISION,
-			longitude    DOUBLE PRECISION,
-			country_code TEXT,
-			deleted      BOOLEAN,
-			data         JSONB,
+			provider      TEXT,
+			external_id   BIGINT,
+			slug          TEXT,
+			name          TEXT,
+			latitude      DOUBLE PRECISION,
+			longitude     DOUBLE PRECISION,
+			country_code  TEXT,
+			deleted       BOOLEAN,
+			data          JSONB,
 			import_run_id BIGINT
 		) ON COMMIT DROP
 	`)
@@ -224,18 +230,17 @@ func (imp *Importer) upsertBatch(ctx context.Context, hotels []Hotel, importRunI
 		return 0, fmt.Errorf("create temp table: %w", err)
 	}
 
-	// Быстрая вставка в temp через CopyFrom
 	rows := make([][]any, len(hotels))
 	for i, h := range hotels {
 		rows[i] = []any{
-			h.HID, h.ID, h.Name, h.Lat, h.Lon,
+			imp.provider, h.HID, h.ID, h.Name, h.Lat, h.Lon,
 			h.Country, h.Deleted, string(h.Raw), importRunID,
 		}
 	}
 
 	_, err = tx.CopyFrom(ctx,
 		pgx.Identifier{"hotels_import_batch"},
-		[]string{"external_id", "slug", "name", "latitude", "longitude",
+		[]string{"provider", "external_id", "slug", "name", "latitude", "longitude",
 			"country_code", "deleted", "data", "import_run_id"},
 		pgx.CopyFromRows(rows),
 	)
@@ -243,10 +248,10 @@ func (imp *Importer) upsertBatch(ctx context.Context, hotels []Hotel, importRunI
 		return 0, fmt.Errorf("copy from: %w", err)
 	}
 
-	// Upsert из temp → основная таблица
 	tag, err := tx.Exec(ctx, `
-		INSERT INTO hotels (external_id, slug, name, latitude, longitude, country_code, deleted_at, data, updated_at)
+		INSERT INTO hotels (provider, external_id, slug, name, latitude, longitude, country_code, deleted_at, data, updated_at)
 		SELECT
+			b.provider,
 			b.external_id,
 			b.slug,
 			b.name,
@@ -257,7 +262,7 @@ func (imp *Importer) upsertBatch(ctx context.Context, hotels []Hotel, importRunI
 			b.data,
 			NOW()
 		FROM hotels_import_batch b
-		ON CONFLICT (external_id) DO UPDATE SET
+		ON CONFLICT (provider, external_id) DO UPDATE SET
 			slug         = EXCLUDED.slug,
 			name         = EXCLUDED.name,
 			latitude     = EXCLUDED.latitude,
@@ -283,13 +288,13 @@ func (imp *Importer) upsertBatch(ctx context.Context, hotels []Hotel, importRunI
 // import_runs
 // ---------------------------------------------------------------------------
 
-func createImportRun(ctx context.Context, pool *pgxpool.Pool, importType, filename string) (int64, error) {
+func createImportRun(ctx context.Context, pool *pgxpool.Pool, provider, importType, filename string) (int64, error) {
 	var id int64
 	err := pool.QueryRow(ctx, `
-		INSERT INTO import_runs (type, filename, status, started_at)
-		VALUES ($1, $2, 'running', NOW())
+		INSERT INTO import_runs (provider, type, filename, status, started_at)
+		VALUES ($1, $2, $3, 'running', NOW())
 		RETURNING id
-	`, importType, filename).Scan(&id)
+	`, provider, importType, filename).Scan(&id)
 	return id, err
 }
 
@@ -381,7 +386,6 @@ func main() {
 	cfg := configFromEnv()
 	ctx := context.Background()
 
-	// Подключение к БД
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("failed to connect to database", "err", err)
@@ -393,9 +397,8 @@ func main() {
 		slog.Error("database ping failed", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("connected to database")
+	slog.Info("connected to database", "provider", cfg.Provider)
 
-	// Находим файл дампа
 	dumpPath, err := findLatestDump(cfg.DumpsDir)
 	if err != nil {
 		slog.Error("no dump found", "err", err)
@@ -407,16 +410,14 @@ func main() {
 		importType = "full_dump"
 	}
 
-	slog.Info("starting import", "file", filename, "type", importType)
+	slog.Info("starting import", "file", filename, "type", importType, "provider", cfg.Provider)
 
-	// Создаём запись о запуске
-	runID, err := createImportRun(ctx, pool, importType, filename)
+	runID, err := createImportRun(ctx, pool, cfg.Provider, importType, filename)
 	if err != nil {
 		slog.Error("failed to create import_run", "err", err)
 		os.Exit(1)
 	}
 
-	// Открываем файл
 	f, err := os.Open(dumpPath)
 	if err != nil {
 		slog.Error("failed to open dump", "err", err)
@@ -432,10 +433,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Импорт
 	start := time.Now()
 	progress := newImportProgress(fi.Size(), start)
-	imp := NewImporter(pool, cfg.BatchSize, cfg.MaxLineSize)
+	imp := NewImporter(pool, cfg.Provider, cfg.BatchSize, cfg.MaxLineSize)
 	stats, lineErrors, importErr := imp.Import(ctx, f, runID, progress)
 
 	finishImportRun(ctx, pool, runID, stats, lineErrors, importErr)

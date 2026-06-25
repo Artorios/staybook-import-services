@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: ostrovok_db
+    container_name: import_service_db
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -23,7 +23,7 @@ services:
       - max_logical_replication_workers=10
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
     ports:
       - "${POSTGRES_PORT}:${POSTGRES_PORT}"
     healthcheck:
@@ -32,11 +32,11 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - ostrovok
+      - import-service
 
   debezium-connect:
     image: quay.io/debezium/connect:3.0
-    container_name: ostrovok_debezium_connect
+    container_name: import_service_debezium_connect
     restart: unless-stopped
     depends_on:
       postgres:
@@ -61,12 +61,12 @@ services:
     ports:
       - "${DEBEZIUM_CONNECT_PORT:-8083}:8083"
     networks:
-      - ostrovok
+      - import-service
       - staybook-network
 
   debezium-init:
     image: curlimages/curl:8.12.1
-    container_name: ostrovok_debezium_init
+    container_name: import_service_debezium_init
     restart: "no"
     depends_on:
       postgres:
@@ -86,30 +86,14 @@ services:
       - ./debezium/register-connector.sh:/register-connector.sh:ro
     entrypoint: ["/bin/sh", "/register-connector.sh"]
     networks:
-      - ostrovok
-
-  ostrovok-import-service:
-    build: .
-    container_name: ostrovok_app
-    restart: "no"
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable
-      DUMPS_DIR: /data
-      BATCH_SIZE: ${BATCH_SIZE}
-      MAX_LINE_SIZE: ${MAX_LINE_SIZE:-16777216}
-    volumes:
-      - ./data:/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - ostrovok
+      - import-service
 
 volumes:
   postgres_data:
 
 networks:
-  ostrovok:
+  import-service:
+    name: import-service
     driver: bridge
   staybook-network:
     external: true

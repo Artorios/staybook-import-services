@@ -2,7 +2,7 @@
 set -eu
 
 CONNECT_URL="http://debezium-connect:8083"
-CONNECTOR_NAME="${DEBEZIUM_CONNECTOR_NAME:-ostrovok-postgres-connector}"
+CONNECTOR_NAME="${DEBEZIUM_CONNECTOR_NAME:-import-service-postgres-connector}"
 
 echo "Waiting for Kafka Connect at ${CONNECT_URL}..."
 until curl -sf "${CONNECT_URL}/" >/dev/null 2>&1; do
@@ -34,8 +34,8 @@ payload=$(cat <<EOF
   "tombstones.on.delete": "false",
   "producer.override.max.request.size": "16777216",
   "snapshot.fetch.size": "100",
-  "max.batch.size": "100"
-  "message.key.columns": "public.hotels:external_id",
+  "max.batch.size": "100",
+  "message.key.columns": "public.hotels:provider,external_id"
 }
 EOF
 )

@@ -1,8 +1,9 @@
--- Основная таблица отелей
+-- Основная таблица отелей (общая для всех провайдеров import-service)
 CREATE TABLE IF NOT EXISTS hotels (
     id           BIGSERIAL PRIMARY KEY,
-    external_id  BIGINT        NOT NULL,          -- hid из дампа
-    slug         TEXT          NOT NULL,          -- id из дампа (строковый)
+    provider     TEXT          NOT NULL,           -- 'emergingtravel', ...
+    external_id  BIGINT        NOT NULL,           -- hid из дампа Emerging Travel
+    slug         TEXT          NOT NULL,           -- id из дампа (строковый)
     name         TEXT          NOT NULL,
     latitude     DOUBLE PRECISION,
     longitude    DOUBLE PRECISION,
@@ -12,16 +13,18 @@ CREATE TABLE IF NOT EXISTS hotels (
     created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT hotels_external_id_unique UNIQUE (external_id)
+    CONSTRAINT hotels_provider_external_id_unique UNIQUE (provider, external_id)
 );
 
-CREATE INDEX IF NOT EXISTS hotels_country_code_idx ON hotels (country_code);
-CREATE INDEX IF NOT EXISTS hotels_deleted_at_idx   ON hotels (deleted_at) WHERE deleted_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS hotels_data_gin_idx     ON hotels USING GIN (data); -- поиск внутри JSONB
+CREATE INDEX IF NOT EXISTS hotels_provider_country_code_idx ON hotels (provider, country_code);
+CREATE INDEX IF NOT EXISTS hotels_provider_slug_idx         ON hotels (provider, slug);
+CREATE INDEX IF NOT EXISTS hotels_deleted_at_idx             ON hotels (deleted_at) WHERE deleted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS hotels_data_gin_idx               ON hotels USING GIN (data);
 
 -- История запусков импорта
 CREATE TABLE IF NOT EXISTS import_runs (
     id           BIGSERIAL PRIMARY KEY,
+    provider     TEXT          NOT NULL,
     type         TEXT          NOT NULL,           -- 'full_dump' | 'incremental_dump'
     filename     TEXT          NOT NULL,
     status       TEXT          NOT NULL DEFAULT 'running', -- 'running' | 'success' | 'failed'

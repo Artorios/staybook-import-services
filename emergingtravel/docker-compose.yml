@@ -1,0 +1,19 @@
+services:
+  emergingtravel-import-service:
+    build: .
+    container_name: emergingtravel_app
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@import_service_db:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable
+      PROVIDER: emergingtravel
+      DUMPS_DIR: /data
+      BATCH_SIZE: ${BATCH_SIZE}
+      MAX_LINE_SIZE: ${MAX_LINE_SIZE:-16777216}
+    volumes:
+      - ./data:/data
+    networks:
+      - import-service
+
+networks:
+  import-service:
+    external: true
